@@ -6,6 +6,7 @@ import base64
 import random
 import datetime
 import io
+import numpy as np
 
 import streamlit as st
 import pandas as pd
@@ -261,7 +262,7 @@ def course_recommender(course_list):
 # =========================
 # SCORE & UTILS
 # =========================
-def compute_resume_score(text: str) -> int:
+def compute_resume_score(text: str):
     score = 0
     if re.search(r"\bObjective\b", text, flags=re.I):
         score += 20
@@ -289,12 +290,149 @@ def fetch_yt_title(link: str) -> str:
         return "Video"
 
 # =========================
+# JOB DESCRIPTION MATCHING
+# =========================
+def match_resume_to_job(resume_text, job_description, skills):
+    """Match resume to job description and give recommendations"""
+    # Create spaCy docs
+    resume_doc = nlp(resume_text)
+    job_doc = nlp(job_description)
+    
+    # Extract job skills
+    job_skills = extract_skills(job_doc)
+    
+    # Calculate skill match percentage
+    matching_skills = set(skills).intersection(set(job_skills))
+    missing_skills = set(job_skills) - set(skills)
+    
+    if job_skills:
+        match_percentage = (len(matching_skills) / len(job_skills)) * 100
+    else:
+        match_percentage = 0
+    
+    # Semantic similarity
+    resume_vector = resume_doc.vector
+    job_vector = job_doc.vector
+    
+    # Calculate cosine similarity if vectors are not zero
+    if np.any(resume_vector) and np.any(job_vector):
+        similarity = np.dot(resume_vector, job_vector) / (np.linalg.norm(resume_vector) * np.linalg.norm(job_vector))
+    else:
+        similarity = 0
+    
+    return {
+        "match_percentage": match_percentage,
+        "matching_skills": list(matching_skills),
+        "missing_skills": list(missing_skills),
+        "semantic_similarity": similarity * 100  # Convert to percentage
+    }
+
+# =========================
 # STREAMLIT APP
 # =========================
 st.set_page_config(page_title="Smart Resume Analyzer", page_icon="./Logo/SRA_Logo.ico", layout="wide")
 
+# Custom CSS for better visual appeal
+def load_custom_css():
+    st.markdown("""
+    <style>
+        /* Overall theme */
+        .main {
+            background-color: #f8f9fa;
+            color: #212529;
+        }
+        
+        /* Headers */
+        h1, h2, h3 {
+            color: #0366d6;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+        
+        /* Cards for important sections */
+        .stcard {
+            background-color: white;
+            border-radius: 8px;
+            padding: 20px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+        }
+        
+        /* Success buttons */
+        .stButton>button {
+            background-color: #28a745;
+            color: white;
+        }
+        
+        /* Metrics */
+        .metric-label {
+            font-weight: bold;
+            font-size: 1.2rem;
+            color: #333;
+        }
+        
+        .metric-value {
+            font-size: 2.5rem;
+            font-weight: bold;
+            color: #0366d6;
+        }
+        
+        /* Skill tags */
+        .skills-tag {
+            display: inline-block;
+            background-color: #e1ecf4;
+            color: #0366d6;
+            padding: 5px 10px;
+            margin: 5px;
+            border-radius: 5px;
+            font-size: 0.9em;
+        }
+        
+        /* Animations */
+        @keyframes fadeIn {
+            from { opacity: 0; }
+            to { opacity: 1; }
+        }
+        
+        .fade-in {
+            animation: fadeIn 0.5s ease-in-out;
+        }
+        
+        /* Admin dashboard */
+        .admin-section {
+            background-color: #f1f8ff;
+            border-left: 4px solid #0366d6;
+            padding: 15px;
+            margin-bottom: 20px;
+        }
+    </style>
+    """, unsafe_allow_html=True)
+
+# Modern card component
+def st_card(title, content, icon=None):
+    card_html = f"""
+    <div class="stcard fade-in">
+        <h3>{icon + ' ' if icon else ''}{title}</h3>
+        <div>{content}</div>
+    </div>
+    """
+    st.markdown(card_html, unsafe_allow_html=True)
+
+# Skill tag display
+def st_skill_tags(skills, is_recommended=False):
+    if not skills:
+        return ""
+        
+    tags_html = ""
+    for skill in skills:
+        bg_color = "#e1ecf4" if not is_recommended else "#d4edda"
+        text_color = "#0366d6" if not is_recommended else "#155724"
+        tags_html += f'<span class="skills-tag" style="background-color:{bg_color};color:{text_color}">{skill}</span>'
+    
+    return tags_html
+
 def run():
     ensure_table()
+    load_custom_css()  # Apply custom styling
 
     st.title("Smart Resume Analyser (spaCy-powered)")
     st.sidebar.markdown("# Choose User")
@@ -383,15 +521,171 @@ def run():
             else:
                 st.warning("We couldn't confidently predict a field from your skills. Add more relevant skills to improve suggestions.")
 
-            # Resume score
+            # Add more detailed resume analysis - Enhanced extraction
+            def extract_education(doc):
+                """Extract education details using pattern matching and entity recognition"""
+                edu_orgs = []
+                edu_degrees = ["bachelor", "master", "phd", "b.tech", "m.tech", "b.e.", "m.e.", "b.s.", "m.s."]
+                
+                # Find education entities
+                for ent in doc.ents:
+                    if ent.label_ == "ORG":
+                        # Check if it's likely an educational institution
+                        if any(edu_term in ent.text.lower() for edu_term in ["university", "college", "institute", "school"]):
+                            edu_orgs.append(ent.text)
+                
+                # Look for degree mentions
+                degree_matches = []
+                for sent in doc.sents:
+                    sent_lower = sent.text.lower()
+                    if any(degree in sent_lower for degree in edu_degrees):
+                        degree_matches.append(sent.text)
+                
+                return {
+                    "institutions": edu_orgs[:3],  # Top 3 likely institutions
+                    "degree_info": degree_matches[:2]  # Top 2 degree mentions
+                }
+
+            def extract_experience(doc):
+                """Extract work experience details"""
+                experience = []
+                
+                # Look for experience section
+                exp_section = False
+                for sent in doc.sents:
+                    sent_lower = sent.text.lower()
+                    if re.search(r"\b(work|professional|employment)\s+experience\b", sent_lower):
+                        exp_section = True
+                        continue
+                        
+                    if exp_section and len(sent.text.strip()) > 20:
+                        if re.search(r"\b(education|skills|projects)\b", sent_lower):
+                            exp_section = False
+                            break
+                        if re.search(r"\b(20\d{2}|19\d{2})\b", sent.text):  # Date indicators
+                            experience.append(sent.text)
+                
+                return experience[:3]  # Return top 3 experience points
+
+            # Enhanced scoring system
+            def compute_resume_score(text: str, skills_count: int) -> dict:
+                """More detailed resume scoring with feedback"""
+                score_details = {
+                    "sections": {
+                        "objective": {"present": False, "points": 10, "feedback": "Add a career objective for clarity"},
+                        "education": {"present": False, "points": 15, "feedback": "Include your education details"},
+                        "experience": {"present": False, "points": 20, "feedback": "Add work experience details"},
+                        "skills": {"present": False, "points": 15, "feedback": "List your technical and soft skills"}, 
+                        "projects": {"present": False, "points": 15, "feedback": "Include relevant projects"},
+                        "achievements": {"present": False, "points": 10, "feedback": "Highlight your achievements"},
+                        "contact": {"present": False, "points": 10, "feedback": "Ensure contact information is complete"},
+                        "formatting": {"present": False, "points": 5, "feedback": "Improve overall document formatting"}
+                    },
+                    "total": 0,
+                    "max_points": 100,
+                    "missing_sections": []
+                }
+                
+                # Check sections
+                if re.search(r"\b(objective|summary|profile)\b", text, flags=re.I):
+                    score_details["sections"]["objective"]["present"] = True
+                
+                if re.search(r"\beducation\b", text, flags=re.I):
+                    score_details["sections"]["education"]["present"] = True
+                    
+                if re.search(r"\b(experience|work|employment)\b", text, flags=re.I):
+                    score_details["sections"]["experience"]["present"] = True
+                    
+                if re.search(r"\bskills\b", text, flags=re.I) or skills_count >= 5:
+                    score_details["sections"]["skills"]["present"] = True
+                    
+                if re.search(r"\bprojects?\b", text, flags=re.I):
+                    score_details["sections"]["projects"]["present"] = True
+                    
+                if re.search(r"\bachievements?\b", text, flags=re.I):
+                    score_details["sections"]["achievements"]["present"] = True
+                    
+                if re.search(EMAIL_RE, text) and re.search(PHONE_RE, text):
+                    score_details["sections"]["contact"]["present"] = True
+                    
+                if len(text.split('\n')) > 10:
+                    score_details["sections"]["formatting"]["present"] = True
+                
+                # Calculate total score
+                for section, details in score_details["sections"].items():
+                    if details["present"]:
+                        score_details["total"] += details["points"]
+                    else:
+                        score_details["missing_sections"].append(details["feedback"])
+                
+                return score_details
+
+            # Add new extraction functions
+            education_info = extract_education(doc)
+            experience_info = extract_experience(doc)
+
+            # Enhanced scoring
+            score_details = compute_resume_score(resume_text, len(found_skills))
+            resume_score = score_details["total"]
+
+            # Display results
+            # Education details
+            st.subheader("📚 Education Details")
+            if education_info["institutions"]:
+                st.write("**Detected Institutions:**")
+                for inst in education_info["institutions"]:
+                    st.write(f"- {inst}")
+            else:
+                st.info("No education institutions clearly detected. Consider making this section more explicit.")
+
+            if education_info["degree_info"]:
+                st.write("**Degree Information:**")
+                for degree in education_info["degree_info"]:
+                    st.write(f"- {degree}")
+
+            # Work experience
+            st.subheader("💼 Work Experience")
+            if experience_info:
+                for exp in experience_info:
+                    st.write(f"- {exp}")
+            else:
+                st.info("No clear work experience detected. If you have relevant experience, make it more explicit.")
+
+            # Enhanced score display with feedback
             st.subheader("**Resume Score 📝**")
-            resume_score = compute_resume_score(resume_text)
-            my_bar = st.progress(0)
-            for i in range(resume_score):
-                time.sleep(0.03)
-                my_bar.progress(i + 1)
-            st.success(f"**Your Resume Writing Score: {resume_score}**")
-            st.caption("Note: Score is based on presence of helpful sections like Objective, Declaration, Hobbies/Interests, Achievements, and Projects.")
+            col1, col2 = st.columns([2,1])
+            with col1:
+                st.progress(resume_score/100)
+                st.success(f"**Your Resume Score: {resume_score}/100**")
+            with col2:
+                gauge_chart = {
+                    "type": "indicator",
+                    "mode": "gauge+number",
+                    "value": resume_score,
+                    "gauge": {
+                        "axis": {"range": [0, 100]},
+                        "bar": {"color": "#5DA5DA" if resume_score < 60 else "#60BD68"},
+                        "steps": [
+                            {"range": [0, 40], "color": "#F15854"},
+                            {"range": [40, 70], "color": "#FAA43A"},
+                            {"range": [70, 100], "color": "#60BD68"}
+                        ],
+                    },
+                    "title": {"text": "Resume Score"}
+                }
+                st.plotly_chart({"data": [gauge_chart], "layout": {"height": 250}}, use_container_width=True)
+
+            # Show improvement areas - Fix the visibility issue
+            if score_details["missing_sections"]:
+                st.subheader("🚀 Areas for Improvement")
+                for i, feedback in enumerate(score_details["missing_sections"]):
+                    # Using a more noticeable warning box with numbered bullets
+                    st.warning(f"{i+1}. {feedback}")
+                    
+                # Add a spacer to ensure visibility
+                st.markdown("<br>", unsafe_allow_html=True)
+            else:
+                st.success("Great job! Your resume covers all the recommended sections.")
 
             # Save to DB
             ts = time.time()
@@ -424,6 +718,42 @@ def run():
             with st.expander("Show Extracted Text"):
                 st.text_area("Raw Text", resume_text, height=300)
 
+            # Job description matching
+            with st.expander("📝 **Compare with Job Description**", expanded=False):
+                st.write("Paste a job description to see how well your resume matches:")
+                job_description = st.text_area("Job Description", height=200)
+                
+                if job_description and st.button("Analyze Match"):
+                    with st.spinner("Analyzing match..."):
+                        match_results = match_resume_to_job(resume_text, job_description, found_skills)
+                        
+                        # Display results
+                        st.subheader("Match Analysis")
+                        
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            st.metric("Skills Match", f"{match_results['match_percentage']:.1f}%")
+                        with col2:
+                            st.metric("Overall Content Similarity", f"{match_results['semantic_similarity']:.1f}%")
+                        
+                        # Display matching and missing skills
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            st.write("✅ **Matching Skills**")
+                            if match_results['matching_skills']:
+                                for skill in match_results['matching_skills']:
+                                    st.success(skill)
+                            else:
+                                st.info("No matching skills found")
+                        
+                        with col2:
+                            st.write("⚠️ **Missing Skills**")
+                            if match_results['missing_skills']:
+                                for skill in match_results['missing_skills']:
+                                    st.error(skill)
+                            else:
+                                st.success("No critical skills missing!")
+
     else:
         st.success("Welcome to Admin Side")
         ad_user = st.text_input("Username")
@@ -432,7 +762,12 @@ def run():
             if ad_user == "machine_learning_hub" and ad_password == "mlhub123":
                 # Load data
                 with get_conn() as connection:
+                    # Modified SQL to exclude timestamp or get all and then drop
                     df = pd.read_sql("SELECT * FROM user_data ORDER BY id DESC", connection)
+                    
+                    # Remove timestamp column from display
+                    if 'Timestamp' in df.columns:
+                        df = df.drop('Timestamp', axis=1)
 
                 st.header("**Users' Data**")
                 st.dataframe(df, use_container_width=True)
