@@ -1,0 +1,18 @@
+pdfminer3
+pyresparser
+streamlit
+pandas
+pafy
+plotly
+streamlit-tags
+Pillow
+youtube-dl
+nltk
+pdfminer3
+spacy==2.3.7
+psycopg2-binary
+pdfplumber
+python-docx
+pyresparser
+
+##python -m spacy download en_core_web_sm
