@@ -170,13 +170,39 @@ def extract_phone(text: str):
     return m.group(0)
 
 def extract_name(doc: spacy.tokens.Doc):
-    # First PERSON entity as Name
-    for ent in doc.ents:
-        if ent.label_ == "PERSON":
-            return ent.text
-    # Fallback: try first two tokens capitalized
-    tokens = [t.text for t in doc[:10] if t.is_title and t.is_alpha]
-    return " ".join(tokens[:2]) if tokens else None
+    """More robust name extraction from resume"""
+    # Look for name patterns at the beginning of document
+    first_page_text = ' '.join([t.text for t in doc[:50]])
+    
+    # Try common resume header patterns first
+    name_patterns = [
+        r"(?i)name\s*:\s*([A-Z][a-z]+\s+[A-Z][a-z]+)",
+        r"(?i)([A-Z][a-z]+\s+[A-Z][a-z]+)(?:\s*\n|\s*$|\s*\|)",
+        r"^([A-Z][a-z]+\s+[A-Z][a-z]+)(?:\s*\n|\s*$)"
+    ]
+    
+    for pattern in name_patterns:
+        match = re.search(pattern, first_page_text)
+        if match:
+            return match.group(1).strip()
+    
+    # If no pattern match, try spaCy's named entity recognition
+    # But only consider PERSON entities near the beginning
+    for ent in list(doc.ents)[:5]:  # First 5 entities
+        if ent.label_ == "PERSON" and ent.start < 50:  # Only in first ~50 tokens
+            # Verify it looks like a name (at least first+last)
+            name_parts = ent.text.strip().split()
+            if len(name_parts) >= 2 and all(p[0].isupper() for p in name_parts if p):
+                return ent.text
+    
+    # Last resort fallback
+    # Look for consecutive capitalized words near the beginning
+    for i in range(min(20, len(doc)-1)):
+        if (doc[i].is_title and doc[i].is_alpha and 
+            doc[i+1].is_title and doc[i+1].is_alpha):
+            return doc[i].text + " " + doc[i+1].text
+    
+    return None
 
 def extract_skills(doc: spacy.tokens.Doc):
     matches = SKILL_MATCHER(doc)
@@ -547,25 +573,69 @@ def run():
                 }
 
             def extract_experience(doc):
-                """Extract work experience details"""
+                """Extract work experience with improved accuracy"""
+                experience_sections = []
                 experience = []
                 
-                # Look for experience section
-                exp_section = False
-                for sent in doc.sents:
-                    sent_lower = sent.text.lower()
-                    if re.search(r"\b(work|professional|employment)\s+experience\b", sent_lower):
-                        exp_section = True
+                # Common section headers for work experience
+                exp_headers = [
+                    r"\b(work|professional|employment)\s+experience\b",
+                    r"\bexperience\b",
+                    r"\bemployment(\s+history)?\b",
+                    r"\bwork\s+history\b",
+                    r"\bcareer\s+history\b"
+                ]
+                
+                # End of experience section markers
+                section_end = [
+                    r"\beducation\b", 
+                    r"\bskills\b", 
+                    r"\bprojects\b",
+                    r"\bawards\b", 
+                    r"\bcertifications\b",
+                    r"\bqualifications\b",
+                    r"\blanguages\b",
+                    r"\binterests\b"
+                ]
+                
+                # Convert text to paragraphs
+                paragraphs = [p.strip() for p in re.split(r'\n\s*\n', doc.text) if p.strip()]
+                
+                # Identify experience section
+                in_exp_section = False
+                for i, para in enumerate(paragraphs):
+                    para_lower = para.lower()
+                    
+                    # Check if paragraph starts an experience section
+                    if any(re.search(pattern, para_lower) for pattern in exp_headers):
+                        in_exp_section = True
                         continue
+                    
+                    # Check if paragraph ends an experience section
+                    if in_exp_section and any(re.search(pattern, para_lower) for pattern in section_end):
+                        in_exp_section = False
                         
-                    if exp_section and len(sent.text.strip()) > 20:
-                        if re.search(r"\b(education|skills|projects)\b", sent_lower):
-                            exp_section = False
-                            break
-                        if re.search(r"\b(20\d{2}|19\d{2})\b", sent.text):  # Date indicators
+                    # Capture experience information
+                    if in_exp_section:
+                        # Look for patterns indicating job entries
+                        # Years, company names, positions, etc.
+                        has_year = re.search(r"\b(19|20)\d{2}\b", para)
+                        has_duration = re.search(r"\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\b.*\b(19|20)\d{2}\b", para_lower)
+                        has_position_pattern = re.search(r"\b(senior|junior|lead|manager|director|engineer|developer|analyst|specialist|consultant)\b", para_lower)
+                        
+                        # Capture paragraph if it likely contains job information
+                        if (has_year or has_duration or has_position_pattern) and len(para) > 30:
+                            experience.append(para)
+                            
+                # If no experience found but section was identified, try a different approach
+                if not experience and in_exp_section:
+                    # Try to extract any reasonable-length text from sentences containing work-related terms
+                    work_terms = ["worked", "responsible", "role", "position", "company", "client", "project"]
+                    for sent in doc.sents:
+                        if any(term in sent.text.lower() for term in work_terms) and len(sent.text) > 40:
                             experience.append(sent.text)
                 
-                return experience[:3]  # Return top 3 experience points
+                return experience[:3]  # Return top 3 experience items
 
             # Enhanced scoring system
             def compute_resume_score(text: str, skills_count: int) -> dict:
